@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: open-inspect
+  labels:
+    app.kubernetes.io/name: control-plane
+    app.kubernetes.io/part-of: open-inspect
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: control-plane
