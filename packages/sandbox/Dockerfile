@@ -1,8 +1,8 @@
-FROM debian:bookworm-slim
+FROM python:3.12-slim-bookworm
 
 # System packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git openssh-client ca-certificates build-essential jq \
+    curl git openssh-client build-essential jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22
@@ -17,22 +17,21 @@ RUN npm install -g pnpm@9
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:$PATH"
 
-# Install sandbox-agent binary
-RUN curl -fsSL https://releases.rivet.dev/sandbox-agent/latest/install.sh | sh
-ENV PATH="/root/.sandbox-agent/bin:$PATH"
-
-# Install Claude Code (primary agent)
-RUN npm install -g @anthropic-ai/claude-code
+# Python dependencies
+COPY pyproject.toml /app/
+RUN pip install --no-cache-dir -e /app
 
 # Install Playwright (for browser automation)
-RUN npx playwright install --with-deps chromium
+RUN pip install --no-cache-dir playwright \
+    && playwright install --with-deps chromium
 
-# Working directory for cloned repos
+# Install OpenCode CLI
+RUN npm install -g opencode@latest
+
+# Copy sandbox source
+COPY src/ /app/sandbox/
+
+ENV PYTHONPATH=/app
 WORKDIR /workspace
 
-# sandbox-agent listens on port 2468 by default
-EXPOSE 2468
-
-# Start sandbox-agent server
-# SANDBOX_AGENT_TOKEN must be set as an environment variable
-ENTRYPOINT ["sandbox-agent", "server", "--host", "0.0.0.0", "--port", "2468"]
+ENTRYPOINT ["python", "-m", "sandbox.entrypoint"]

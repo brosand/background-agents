@@ -1,21 +1,14 @@
 /**
  * Session Manager for Open-Inspect Control Plane.
  *
- * Manages in-memory session state backed by PostgreSQL. Each session has a
- * SessionInstance that holds client WebSocket connections and a sandbox-agent
- * SDK client for controlling the coding agent running inside the sandbox container.
- *
- * Communication with sandboxes uses the sandbox-agent HTTP/SSE API (via the
- * `sandbox-agent` npm package) instead of raw WebSockets. Events from the
- * sandbox-agent's universal event schema are mapped to our SandboxEvent format
- * for frontend compatibility.
+ * Replaces Cloudflare Durable Objects with in-memory session state
+ * backed by PostgreSQL persistence. Each session has a SessionInstance
+ * that holds WebSocket connections and sandbox state.
  */
 
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type WebSocket from "ws";
 import crypto from "node:crypto";
-import { SandboxAgent } from "sandbox-agent";
-import type { UniversalEvent } from "sandbox-agent";
 import { generateId, encryptToken, decryptToken } from "../auth/crypto";
 import {
   getGitHubAppConfig,
@@ -36,10 +29,9 @@ import type {
 const logger = createLogger("session-manager");
 
 const AUTH_TIMEOUT_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 90_000;
 const WS_TOKEN_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 const REPLAY_PAGE_SIZE = 200;
-const SANDBOX_AGENT_HEALTH_POLL_MS = 2_000;
-const SANDBOX_AGENT_HEALTH_TIMEOUT_MS = 60_000;
 
 interface ClientInfo {
   ws: WebSocket;
@@ -55,13 +47,12 @@ interface ClientInfo {
 interface SessionInstance {
   sessionId: string;
   clients: Map<string, ClientInfo>; // clientId -> info
-  sandboxAgent: SandboxAgent | null;
+  sandboxWs: WebSocket | null;
   sandboxActorId: string | null;
-  sandboxSessionId: string | null;
-  sandboxEventAbort: AbortController | null;
   processingMessageId: string | null;
+  heartbeatTimer: ReturnType<typeof setTimeout> | null;
   inactivityTimer: ReturnType<typeof setTimeout> | null;
-  lastEventSequence: number;
+  lastHeartbeat: number;
 }
 
 export class SessionManager {
@@ -89,13 +80,12 @@ export class SessionManager {
       instance = {
         sessionId,
         clients: new Map(),
-        sandboxAgent: null,
+        sandboxWs: null,
         sandboxActorId: null,
-        sandboxSessionId: null,
-        sandboxEventAbort: null,
         processingMessageId: null,
+        heartbeatTimer: null,
         inactivityTimer: null,
-        lastEventSequence: 0,
+        lastHeartbeat: 0,
       };
       this.sessions.set(sessionId, instance);
     }
@@ -137,6 +127,47 @@ export class SessionManager {
         error: err,
       });
     });
+  }
+
+  /**
+   * Handle a sandbox WebSocket connection (from Rivet actor).
+   */
+  handleSandboxConnection(sessionId: string, ws: WebSocket): void {
+    const instance = this.getOrCreateInstance(sessionId);
+    instance.sandboxWs = ws;
+    instance.lastHeartbeat = Date.now();
+
+    this.startHeartbeatMonitor(instance);
+
+    ws.on("message", async (data: Buffer | string) => {
+      try {
+        const event = JSON.parse(data.toString()) as SandboxEvent;
+        await this.handleSandboxEvent(instance, event);
+      } catch (err) {
+        logger.error("Failed to handle sandbox event", {
+          session_id: sessionId,
+          error: err instanceof Error ? err : String(err),
+        });
+      }
+    });
+
+    ws.on("close", () => {
+      instance.sandboxWs = null;
+      this.clearHeartbeatMonitor(instance);
+      this.broadcast(instance, { type: "sandbox_status", status: "stopped" });
+      this.updateSessionField(sessionId, "sandbox_status", "stopped");
+    });
+
+    ws.on("error", (err) => {
+      logger.error("Sandbox WebSocket error", {
+        session_id: sessionId,
+        error: err,
+      });
+    });
+
+    // Notify clients
+    this.broadcast(instance, { type: "sandbox_ready" });
+    this.updateSessionField(sessionId, "sandbox_status", "ready");
   }
 
   private async handleClientMessage(
@@ -311,38 +342,30 @@ export class SessionManager {
       await this.updateSessionField(instance.sessionId, "model", msg.model);
     }
 
-    // Ensure sandbox is running and connected
-    if (!instance.sandboxAgent) {
+    // Ensure sandbox is running
+    if (!instance.sandboxWs) {
       await this.spawnSandbox(instance);
     }
 
-    // Send prompt to sandbox via sandbox-agent SDK
-    if (instance.sandboxAgent && instance.sandboxSessionId) {
+    // Send prompt to sandbox
+    if (instance.sandboxWs && instance.sandboxWs.readyState === 1) {
       instance.processingMessageId = messageId;
       this.broadcast(instance, { type: "processing_status", isProcessing: true });
 
-      try {
-        await instance.sandboxAgent.postMessage(instance.sandboxSessionId, {
-          message: msg.content,
-        });
+      instance.sandboxWs.send(
+        JSON.stringify({
+          type: "prompt",
+          messageId,
+          content: msg.content,
+          model: msg.model,
+          reasoningEffort: msg.reasoningEffort,
+        })
+      );
 
-        await this.pool.query(
-          `UPDATE messages SET status = 'processing', started_at = $1 WHERE id = $2`,
-          [Date.now(), messageId]
-        );
-      } catch (err) {
-        logger.error("Failed to send message to sandbox-agent", {
-          session_id: instance.sessionId,
-          error: err instanceof Error ? err : String(err),
-        });
-        this.send(ws, {
-          type: "error",
-          code: "sandbox_send_failed",
-          message: "Failed to send message to sandbox",
-        });
-        instance.processingMessageId = null;
-        this.broadcast(instance, { type: "processing_status", isProcessing: false });
-      }
+      await this.pool.query(
+        `UPDATE messages SET status = 'processing', started_at = $1 WHERE id = $2`,
+        [Date.now(), messageId]
+      );
     } else {
       this.send(ws, {
         type: "error",
@@ -356,15 +379,8 @@ export class SessionManager {
   }
 
   private async handleStop(instance: SessionInstance): Promise<void> {
-    if (instance.sandboxAgent && instance.sandboxSessionId) {
-      try {
-        await instance.sandboxAgent.terminateSession(instance.sandboxSessionId);
-      } catch (err) {
-        logger.error("Failed to terminate sandbox session", {
-          session_id: instance.sessionId,
-          error: err instanceof Error ? err : String(err),
-        });
-      }
+    if (instance.sandboxWs && instance.sandboxWs.readyState === 1) {
+      instance.sandboxWs.send(JSON.stringify({ type: "stop" }));
     }
   }
 
@@ -407,280 +423,82 @@ export class SessionManager {
     });
   }
 
-  /**
-   * Map a sandbox-agent UniversalEvent to our SandboxEvent format.
-   *
-   * The sandbox-agent emits events in a standardized schema (UniversalEvent)
-   * that works across all supported agents (Claude Code, Codex, OpenCode, Amp).
-   * We map these to our existing SandboxEvent format for frontend compatibility.
-   */
-  private mapUniversalEvent(
-    event: UniversalEvent,
-    sandboxId: string,
-    messageId: string | null
-  ): SandboxEvent[] {
-    const now = new Date(event.time).getTime() || Date.now();
-    const events: SandboxEvent[] = [];
+  private async handleSandboxEvent(
+    instance: SessionInstance,
+    event: SandboxEvent
+  ): Promise<void> {
+    // Update heartbeat on any sandbox event
+    instance.lastHeartbeat = Date.now();
 
-    switch (event.type) {
-      case "item.delta": {
-        // Streaming text delta → token event
-        const delta = event.data as { delta: string; item_id: string };
-        if (delta.delta) {
-          events.push({
-            type: "token",
-            content: delta.delta,
-            messageId: messageId || "",
-            sandboxId,
-            timestamp: now,
-          });
-        }
-        break;
-      }
-
-      case "item.started":
-      case "item.completed": {
-        const itemData = event.data as {
-          item: {
-            item_id: string;
-            kind: string;
-            content: Array<{ type: string; text?: string; name?: string; arguments?: string; call_id?: string; output?: string; path?: string; action?: string; diff?: string }>;
-            status: string;
-            role?: string;
-          };
-        };
-        const item = itemData.item;
-
-        if (item.kind === "tool_call") {
-          // Extract tool call details from content parts
-          for (const part of item.content) {
-            if (part.type === "tool_call") {
-              events.push({
-                type: "tool_call",
-                tool: part.name || "unknown",
-                args: { arguments: part.arguments || "" },
-                callId: part.call_id || item.item_id,
-                messageId: messageId || "",
-                sandboxId,
-                timestamp: now,
-              });
-            } else if (part.type === "file_ref") {
-              events.push({
-                type: "tool_call",
-                tool: part.action || "file",
-                args: { path: part.path, diff: part.diff },
-                callId: item.item_id,
-                messageId: messageId || "",
-                sandboxId,
-                timestamp: now,
-              });
-            }
-          }
-        } else if (item.kind === "tool_result" && event.type === "item.completed") {
-          for (const part of item.content) {
-            if (part.type === "tool_result") {
-              events.push({
-                type: "tool_result",
-                callId: part.call_id || item.item_id,
-                result: part.output || "",
-                messageId: messageId || "",
-                sandboxId,
-                timestamp: now,
-              });
-            } else if (part.type === "text") {
-              events.push({
-                type: "tool_result",
-                callId: item.item_id,
-                result: part.text || "",
-                messageId: messageId || "",
-                sandboxId,
-                timestamp: now,
-              });
-            }
-          }
-        }
-        break;
-      }
-
-      case "turn.ended": {
-        // Turn ended → execution_complete
-        events.push({
-          type: "execution_complete",
-          messageId: messageId || "",
-          success: true,
-          sandboxId,
-          timestamp: now,
-        });
-        break;
-      }
-
-      case "session.ended": {
-        const endData = event.data as {
-          reason: string;
-          terminated_by: string;
-          exit_code?: number;
-          message?: string;
-        };
-        events.push({
-          type: "execution_complete",
-          messageId: messageId || "",
-          success: endData.reason === "completed",
-          error: endData.message || undefined,
-          sandboxId,
-          timestamp: now,
-        });
-        break;
-      }
-
-      case "error": {
-        const errorData = event.data as { message: string; code?: string };
-        events.push({
-          type: "error",
-          error: errorData.message,
-          messageId: messageId || "",
-          sandboxId,
-          timestamp: now,
-        });
-        break;
-      }
-
-      case "permission.requested": {
-        // Auto-approve permissions for background agent execution
-        // This is handled in the event stream loop, not mapped to a frontend event
-        break;
-      }
-
-      // session.started, turn.started, permission.resolved, question.*, agent.unparsed
-      // are not mapped to frontend events (internal lifecycle only)
-      default:
-        break;
+    if (event.type === "heartbeat") {
+      // Just update the heartbeat timestamp, don't store or broadcast
+      return;
     }
 
-    return events;
-  }
+    // Store event in DB
+    const messageId = "messageId" in event ? (event as { messageId?: string }).messageId : undefined;
+    await this.storeEvent(instance.sessionId, event, messageId);
 
-  /**
-   * Start consuming SSE events from the sandbox-agent for a session.
-   * Runs in the background as a long-lived async loop.
-   */
-  private startEventStream(instance: SessionInstance): void {
-    if (!instance.sandboxAgent || !instance.sandboxSessionId) return;
+    // Broadcast to all clients
+    this.broadcast(instance, { type: "sandbox_event", event });
 
-    // Abort any existing stream
-    instance.sandboxEventAbort?.abort();
-    const abort = new AbortController();
-    instance.sandboxEventAbort = abort;
+    // Handle completion
+    if (event.type === "execution_complete") {
+      instance.processingMessageId = null;
+      this.broadcast(instance, { type: "processing_status", isProcessing: false });
 
-    const agent = instance.sandboxAgent;
-    const agentSessionId = instance.sandboxSessionId;
-    const sessionId = instance.sessionId;
-
-    // Get sandbox ID from DB for event mapping
-    const sandboxIdPromise = this.pool.query(
-      `SELECT sandbox_id FROM sessions WHERE id = $1`,
-      [sessionId]
-    ).then(r => r.rows[0]?.sandbox_id || sessionId);
-
-    (async () => {
-      const sandboxId = await sandboxIdPromise;
-
-      try {
-        for await (const event of agent.streamEvents(
-          agentSessionId,
-          { offset: instance.lastEventSequence || undefined },
-          abort.signal
-        )) {
-          // Update last seen sequence for resumption
-          instance.lastEventSequence = event.sequence;
-
-          // Auto-approve permission requests
-          if (event.type === "permission.requested") {
-            const permData = event.data as { permission_id: string };
-            try {
-              await agent.replyPermission(agentSessionId, permData.permission_id, {
-                reply: "once",
-              });
-            } catch (err) {
-              logger.error("Failed to auto-approve permission", {
-                session_id: sessionId,
-                permission_id: permData.permission_id,
-                error: err instanceof Error ? err : String(err),
-              });
-            }
-            continue;
-          }
-
-          // Auto-answer questions (reject them since we can't prompt the user)
-          if (event.type === "question.requested") {
-            const qData = event.data as { question_id: string };
-            try {
-              await agent.rejectQuestion(agentSessionId, qData.question_id);
-            } catch (err) {
-              logger.error("Failed to reject question", {
-                session_id: sessionId,
-                question_id: qData.question_id,
-                error: err instanceof Error ? err : String(err),
-              });
-            }
-            continue;
-          }
-
-          // Map to our event format
-          const mappedEvents = this.mapUniversalEvent(
-            event,
-            sandboxId,
-            instance.processingMessageId
-          );
-
-          for (const sandboxEvent of mappedEvents) {
-            // Store event in DB
-            await this.storeEvent(sessionId, sandboxEvent, instance.processingMessageId);
-
-            // Broadcast to all clients
-            this.broadcast(instance, { type: "sandbox_event", event: sandboxEvent });
-
-            // Handle completion
-            if (sandboxEvent.type === "execution_complete") {
-              const currentMessageId = instance.processingMessageId;
-              instance.processingMessageId = null;
-              this.broadcast(instance, { type: "processing_status", isProcessing: false });
-
-              if (currentMessageId) {
-                const status = sandboxEvent.success ? "completed" : "failed";
-                await this.pool.query(
-                  `UPDATE messages SET status = $1, completed_at = $2 WHERE id = $3`,
-                  [status, Date.now(), currentMessageId]
-                );
-              }
-
-              await this.updateSessionField(sessionId, "status", "active");
-            }
-          }
-
-          // Handle session ended - clean up the agent connection
-          if (event.type === "session.ended") {
-            logger.info("Sandbox session ended", {
-              session_id: sessionId,
-              reason: (event.data as { reason: string }).reason,
-            });
-            this.broadcast(instance, { type: "sandbox_status", status: "stopped" });
-            await this.updateSessionField(sessionId, "sandbox_status", "stopped");
-            break;
-          }
-        }
-      } catch (err) {
-        if (abort.signal.aborted) {
-          logger.info("Event stream aborted", { session_id: sessionId });
-          return;
-        }
-        logger.error("Event stream error", {
-          session_id: sessionId,
-          error: err instanceof Error ? err : String(err),
-        });
-        this.broadcast(instance, { type: "sandbox_status", status: "stale" });
-        await this.updateSessionField(sessionId, "sandbox_status", "stale");
+      if (messageId) {
+        const status = "success" in event && event.success ? "completed" : "failed";
+        await this.pool.query(
+          `UPDATE messages SET status = $1, completed_at = $2 WHERE id = $3`,
+          [status, Date.now(), messageId]
+        );
       }
-    })();
+
+      // Update session status
+      await this.updateSessionField(instance.sessionId, "status", "active");
+    }
+
+    // Handle push events
+    if (event.type === "push_complete" && "branchName" in event) {
+      await this.updateSessionField(
+        instance.sessionId,
+        "branch_name",
+        event.branchName
+      );
+    }
+
+    // Handle artifacts
+    if (event.type === "artifact" && "artifactType" in event) {
+      const artifactEvent = event as {
+        type: "artifact";
+        artifactType: string;
+        url: string;
+        metadata?: Record<string, unknown>;
+        timestamp: number;
+      };
+      const artifactId = generateId();
+      await this.pool.query(
+        `INSERT INTO artifacts (id, session_id, type, url, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          artifactId,
+          instance.sessionId,
+          artifactEvent.artifactType,
+          artifactEvent.url,
+          JSON.stringify(artifactEvent.metadata || {}),
+          artifactEvent.timestamp,
+        ]
+      );
+      this.broadcast(instance, {
+        type: "artifact_created",
+        artifact: {
+          id: artifactId,
+          type: artifactEvent.artifactType,
+          url: artifactEvent.url,
+        },
+      });
+    }
   }
 
   private async spawnSandbox(instance: SessionInstance): Promise<void> {
@@ -758,57 +576,10 @@ export class SessionManager {
       });
 
       instance.sandboxActorId = result.providerObjectId || null;
-
-      if (!result.sandboxUrl || !result.sandboxAgentToken) {
-        throw new Error("Sandbox created but no URL or token returned");
-      }
-
-      logger.info("Sandbox created, waiting for sandbox-agent health", {
+      logger.info("Sandbox spawn initiated", {
         session_id: instance.sessionId,
         sandbox_id: sandboxId,
         actor_id: result.providerObjectId,
-        sandbox_url: result.sandboxUrl,
-      });
-
-      // Wait for sandbox-agent to become healthy
-      await this.waitForSandboxHealth(result.sandboxUrl, result.sandboxAgentToken);
-
-      // Connect to sandbox-agent via SDK
-      const agent = await SandboxAgent.connect({
-        baseUrl: result.sandboxUrl,
-        token: result.sandboxAgentToken,
-      });
-
-      instance.sandboxAgent = agent;
-
-      // Create a sandbox-agent session with Claude Code
-      const agentSessionId = `session-${instance.sessionId}`;
-      const createResult = await agent.createSession(agentSessionId, {
-        agent: "claude-code",
-        directory: "/workspace",
-        permissionMode: "auto",
-        model: session.model || undefined,
-      });
-
-      if (!createResult.healthy) {
-        throw new Error(
-          `sandbox-agent session creation failed: ${createResult.error?.message || "unhealthy"}`
-        );
-      }
-
-      instance.sandboxSessionId = agentSessionId;
-
-      // Start consuming SSE events from the sandbox
-      this.startEventStream(instance);
-
-      // Notify clients
-      this.broadcast(instance, { type: "sandbox_ready" });
-      await this.updateSessionField(instance.sessionId, "sandbox_status", "ready");
-
-      logger.info("Sandbox agent connected", {
-        session_id: instance.sessionId,
-        sandbox_id: sandboxId,
-        agent_session_id: agentSessionId,
       });
     } catch (err) {
       logger.error("Failed to spawn sandbox", {
@@ -821,31 +592,6 @@ export class SessionManager {
       });
       await this.updateSessionField(instance.sessionId, "sandbox_status", "failed");
     }
-  }
-
-  /**
-   * Poll sandbox-agent health endpoint until it responds.
-   */
-  private async waitForSandboxHealth(
-    sandboxUrl: string,
-    token: string
-  ): Promise<void> {
-    const deadline = Date.now() + SANDBOX_AGENT_HEALTH_TIMEOUT_MS;
-
-    while (Date.now() < deadline) {
-      try {
-        const response = await fetch(`${sandboxUrl}/v1/health`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (response.ok) return;
-      } catch {
-        // Expected while container is starting up
-      }
-      await new Promise((resolve) => setTimeout(resolve, SANDBOX_AGENT_HEALTH_POLL_MS));
-    }
-
-    throw new Error("Sandbox agent health check timed out");
   }
 
   private async getUserEnvVars(
@@ -1150,6 +896,29 @@ export class SessionManager {
     this.broadcast(instance, { type: "presence_sync", participants });
   }
 
+  private startHeartbeatMonitor(instance: SessionInstance): void {
+    this.clearHeartbeatMonitor(instance);
+
+    instance.heartbeatTimer = setInterval(() => {
+      const elapsed = Date.now() - instance.lastHeartbeat;
+      if (elapsed > HEARTBEAT_TIMEOUT_MS) {
+        logger.warn("Sandbox heartbeat timeout", {
+          session_id: instance.sessionId,
+          elapsed_ms: elapsed,
+        });
+        this.broadcast(instance, { type: "sandbox_status", status: "stale" });
+        this.updateSessionField(instance.sessionId, "sandbox_status", "stale");
+      }
+    }, 30_000);
+  }
+
+  private clearHeartbeatMonitor(instance: SessionInstance): void {
+    if (instance.heartbeatTimer) {
+      clearInterval(instance.heartbeatTimer);
+      instance.heartbeatTimer = null;
+    }
+  }
+
   private resetInactivityTimer(instance: SessionInstance): void {
     if (instance.inactivityTimer) {
       clearTimeout(instance.inactivityTimer);
@@ -1162,26 +931,17 @@ export class SessionManager {
           actor_id: instance.sandboxActorId,
         });
 
-        // Abort the SSE stream
-        instance.sandboxEventAbort?.abort();
-        instance.sandboxEventAbort = null;
-
-        // Dispose the sandbox-agent SDK client
-        if (instance.sandboxAgent) {
-          try {
-            await instance.sandboxAgent.dispose();
-          } catch {
-            // Ignore dispose errors
-          }
-          instance.sandboxAgent = null;
+        if (instance.sandboxWs) {
+          instance.sandboxWs.close();
+          instance.sandboxWs = null;
         }
-        instance.sandboxSessionId = null;
 
         await this.sandboxProvider.destroySandbox(instance.sandboxActorId);
         instance.sandboxActorId = null;
         await this.updateSessionField(instance.sessionId, "sandbox_status", "stopped");
 
         // Clean up the in-memory instance
+        this.clearHeartbeatMonitor(instance);
         this.sessions.delete(instance.sessionId);
       }
     }, this.config.sandboxInactivityTimeoutMs);
@@ -1307,27 +1067,17 @@ export class SessionManager {
   }
 
   /**
-   * Graceful shutdown - close all connections.
+   * Graceful shutdown - close all WebSocket connections.
    */
   async shutdown(): Promise<void> {
     for (const instance of this.sessions.values()) {
-      // Close client WebSockets
       for (const client of instance.clients.values()) {
         client.ws.close(1001, "Server shutting down");
       }
-
-      // Abort SSE streams
-      instance.sandboxEventAbort?.abort();
-
-      // Dispose sandbox-agent clients
-      if (instance.sandboxAgent) {
-        try {
-          await instance.sandboxAgent.dispose();
-        } catch {
-          // Ignore dispose errors during shutdown
-        }
+      if (instance.sandboxWs) {
+        instance.sandboxWs.close(1001, "Server shutting down");
       }
-
+      this.clearHeartbeatMonitor(instance);
       if (instance.inactivityTimer) {
         clearTimeout(instance.inactivityTimer);
       }

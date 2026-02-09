@@ -143,7 +143,7 @@ export type ServerMessage =
       cursor: { timestamp: number; id: string } | null;
     };
 
-// Sandbox events (mapped from sandbox-agent UniversalEvent format)
+// Sandbox events (from Modal)
 export type SandboxEvent =
   | { type: "heartbeat"; sandboxId: string; status: string; timestamp: number }
   | {

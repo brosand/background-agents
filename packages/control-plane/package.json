@@ -19,7 +19,6 @@
     "hono": "^4.6.0",
     "pg": "^8.13.0",
     "redis": "^4.7.0",
-    "sandbox-agent": "^0.1.10",
     "ws": "^8.18.0"
   },
   "devDependencies": {
