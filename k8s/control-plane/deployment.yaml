@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: open-inspect
+  labels:
+    app: open-inspect
+    component: control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: open-inspect
+      component: control-plane
+  template:
+    metadata:
+      labels:
+        app: open-inspect
+        component: control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: open-inspect-control-plane:latest
+          ports:
+            - containerPort: 8787
+              name: http
+          env:
+            - name: PORT
+              value: "8787"
+            - name: DATABASE_URL
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@postgres:5432/open_inspect"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+            - name: SANDBOX_API_URL
+              value: "http://sandbox-api:8080"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+          envFrom:
+            - secretRef:
+                name: api-secrets
+            - secretRef:
+                name: github-app
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: open-inspect
+spec:
+  selector:
+    app: open-inspect
+    component: control-plane
+  ports:
+    - port: 8787
+      targetPort: 8787
+      name: http
+---
+# Ingress for external access (adjust for your ingress controller)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: control-plane
+  namespace: open-inspect
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  rules:
+    - host: api.open-inspect.example.com  # Change to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port:
+                  number: 8787

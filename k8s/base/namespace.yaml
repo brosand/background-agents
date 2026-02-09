@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: open-inspect
+  labels:
+    app: open-inspect
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: open-inspect-sandboxes
+  labels:
+    app: open-inspect
+    component: sandbox

@@ -130,11 +130,10 @@ jobs:
       - name: Run control-plane tests
         run: npm test -w @open-inspect/control-plane
 
-      - name: Install workerd runtime dependency
-        run: sudo apt-get update && sudo apt-get install -y libc++1
-
-      - name: Run control-plane integration tests
-        run: npm run test:integration -w @open-inspect/control-plane
+      # Integration tests require running services (Postgres, Redis)
+      # Run them in the deploy-k8s workflow instead
+      # - name: Run control-plane integration tests
+      #   run: npm run test:integration -w @open-inspect/control-plane
 
       - name: Run web tests
         run: npm test -w @open-inspect/web
