@@ -77,6 +77,11 @@ spec:
   selector:
     app: open-inspect
     component: control-plane
+  # Sticky sessions for internal traffic (sandbox bridge WebSocket connections)
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
   ports:
     - port: 8787
       targetPort: 8787
@@ -96,6 +101,12 @@ metadata:
     nginx.ingress.kubernetes.io/configuration-snippet: |
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
+    # Sticky sessions — required because SessionActorManager holds per-session
+    # state in memory. All requests for a given client must hit the same pod.
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "open-inspect-affinity"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "3600"
+    nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
 spec:
   rules:
     - host: api.open-inspect.example.com  # Change to your domain
