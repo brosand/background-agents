@@ -1,59 +1,67 @@
 # =============================================================================
-# Provider Authentication
+# Kubernetes Configuration
 # =============================================================================
 
-variable "cloudflare_api_token" {
-  description = "Cloudflare API token with Workers, KV, R2, and D1 permissions"
+variable "kubeconfig_path" {
+  description = "Path to kubeconfig file"
   type        = string
-  sensitive   = true
+  default     = "~/.kube/config"
 }
 
-variable "cloudflare_account_id" {
-  description = "Cloudflare account ID"
+variable "kube_context" {
+  description = "Kubernetes context to use"
   type        = string
+  default     = ""
 }
 
-variable "cloudflare_zone_id" {
-  description = "Cloudflare zone ID (optional, for custom domains)"
+variable "namespace" {
+  description = "Kubernetes namespace for deployment"
   type        = string
-  default     = null
+  default     = "open-inspect"
 }
 
-variable "cloudflare_worker_subdomain" {
-  description = "Cloudflare Workers subdomain (account-specific, found in Workers dashboard)"
-  type        = string
-}
+# =============================================================================
+# Domain Configuration
+# =============================================================================
 
-variable "vercel_api_token" {
-  description = "Vercel API token"
-  type        = string
-  sensitive   = true
-}
-
-variable "vercel_team_id" {
-  description = "Vercel team ID"
+variable "control_plane_domain" {
+  description = "Domain for the control plane API"
   type        = string
 }
 
-variable "modal_token_id" {
-  description = "Modal API token ID"
-  type        = string
-  sensitive   = true
-}
-
-variable "modal_token_secret" {
-  description = "Modal API token secret"
-  type        = string
-  sensitive   = true
-}
-
-variable "modal_workspace" {
-  description = "Modal workspace name (used in endpoint URLs)"
+variable "web_app_domain" {
+  description = "Domain for the web application"
   type        = string
 }
 
 # =============================================================================
-# GitHub OAuth App Credentials
+# Rivet Configuration
+# =============================================================================
+
+variable "rivet_api_url" {
+  description = "Rivet API URL for sandbox orchestration"
+  type        = string
+}
+
+variable "rivet_token" {
+  description = "Rivet API token"
+  type        = string
+  sensitive   = true
+}
+
+variable "rivet_project" {
+  description = "Rivet project ID"
+  type        = string
+}
+
+variable "rivet_environment" {
+  description = "Rivet environment (e.g., production)"
+  type        = string
+  default     = "production"
+}
+
+# =============================================================================
+# GitHub Configuration
 # =============================================================================
 
 variable "github_client_id" {
@@ -67,125 +75,75 @@ variable "github_client_secret" {
   sensitive   = true
 }
 
-# =============================================================================
-# GitHub App Credentials (for Modal sandbox)
-# =============================================================================
-
 variable "github_app_id" {
   description = "GitHub App ID"
   type        = string
+  default     = ""
 }
 
 variable "github_app_private_key" {
-  description = "GitHub App private key (PKCS#8 format)"
+  description = "GitHub App private key (PEM format)"
   type        = string
   sensitive   = true
+  default     = ""
 }
 
 variable "github_app_installation_id" {
   description = "GitHub App installation ID"
   type        = string
+  default     = ""
 }
 
 # =============================================================================
-# Slack App Credentials
-# =============================================================================
-
-variable "slack_bot_token" {
-  description = "Slack Bot OAuth token (xoxb-...)"
-  type        = string
-  sensitive   = true
-}
-
-variable "slack_signing_secret" {
-  description = "Slack app signing secret"
-  type        = string
-  sensitive   = true
-}
-
-# =============================================================================
-# API Keys
-# =============================================================================
-
-variable "anthropic_api_key" {
-  description = "Anthropic API key for Claude"
-  type        = string
-  sensitive   = true
-}
-
-# =============================================================================
-# Security Secrets
+# Secrets
 # =============================================================================
 
 variable "token_encryption_key" {
-  description = "Key for encrypting tokens (generate with: openssl rand -base64 32)"
+  description = "AES-256 key for encrypting OAuth tokens (hex-encoded)"
   type        = string
   sensitive   = true
 }
 
 variable "repo_secrets_encryption_key" {
-  description = "Key for encrypting repo secrets in D1 (generate with: openssl rand -base64 32)"
+  description = "AES-256 key for encrypting repository secrets (hex-encoded)"
   type        = string
   sensitive   = true
 }
 
 variable "internal_callback_secret" {
-  description = "Shared secret for internal service communication (generate with: openssl rand -base64 32)"
-  type        = string
-  sensitive   = true
-}
-
-variable "modal_api_secret" {
-  description = "Shared secret for authenticating control plane to Modal API calls (generate with: openssl rand -hex 32)"
+  description = "HMAC secret for service-to-service authentication"
   type        = string
   sensitive   = true
 }
 
 variable "nextauth_secret" {
-  description = "NextAuth.js secret (generate with: openssl rand -base64 32)"
+  description = "NextAuth.js session secret"
   type        = string
   sensitive   = true
 }
 
 # =============================================================================
-# Configuration
+# Database
 # =============================================================================
 
-variable "deployment_name" {
-  description = "Unique deployment name used in URLs and resource names. Use something unique like your GitHub username or company name (e.g., 'acme', 'johndoe'). This will create URLs like: open-inspect-{deployment_name}.vercel.app"
+variable "db_password" {
+  description = "PostgreSQL password for the open_inspect user"
   type        = string
-}
-
-variable "enable_durable_object_bindings" {
-  description = "Enable DO bindings. For initial deployment: set to false (applies migrations), then set to true (adds bindings)."
-  type        = bool
-  default     = true
-}
-
-variable "enable_service_bindings" {
-  description = "Enable service bindings. Set false for initial deployment if target workers don't exist yet."
-  type        = bool
-  default     = true
-}
-
-variable "project_root" {
-  description = "Root path to the project repository"
-  type        = string
-  default     = "../../../"
+  sensitive   = true
 }
 
 # =============================================================================
-# Access Control
+# Container Images
 # =============================================================================
 
-variable "allowed_users" {
-  description = "Comma-separated list of GitHub usernames allowed to sign in (empty = allow all)"
+variable "control_plane_image" {
+  description = "Control plane container image"
   type        = string
-  default     = ""
+  default     = "open-inspect/control-plane:latest"
 }
 
-variable "allowed_email_domains" {
-  description = "Comma-separated list of email domains allowed to sign in (e.g., 'example.com,corp.io'). Empty = allow all domains."
+variable "web_image" {
+  description = "Web frontend container image"
   type        = string
-  default     = ""
+  default     = "open-inspect/web:latest"
 }

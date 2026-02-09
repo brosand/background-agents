@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import type { Artifact } from "@/types/session";
 
 // WebSocket URL (should come from env in production)
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8787";
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001";
 
 // WebSocket close codes
 const WS_CLOSE_AUTH_REQUIRED = 4001;

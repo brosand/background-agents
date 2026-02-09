@@ -1,0 +1,88 @@
+# Open-Inspect Helm Chart values
+
+# Control Plane
+controlPlane:
+  replicas: 2
+  image:
+    repository: open-inspect/control-plane
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3001
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Web Frontend
+web:
+  replicas: 2
+  image:
+    repository: open-inspect/web
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Rivet configuration
+rivet:
+  apiUrl: ""
+  project: ""
+  environment: "production"
+  sandboxBuildTag: "latest"
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "open-inspect-control-plane"
+  controlPlane:
+    host: control-plane.example.com
+    tls: true
+    tlsSecretName: control-plane-tls
+  web:
+    host: app.example.com
+    tls: true
+    tlsSecretName: web-tls
+
+# PostgreSQL (Bitnami subchart)
+postgresql:
+  enabled: true
+  auth:
+    database: open_inspect
+    username: open_inspect
+    existingSecret: open-inspect-db
+    secretKeys:
+      adminPasswordKey: postgres-password
+      userPasswordKey: password
+  primary:
+    persistence:
+      size: 20Gi
+    initdb:
+      scriptsConfigMap: open-inspect-db-init
+
+# Redis (Bitnami subchart)
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      size: 1Gi
+
+# Secrets (must be created separately or via Terraform)
+secrets:
+  controlPlane: open-inspect-control-plane
+  web: open-inspect-web
