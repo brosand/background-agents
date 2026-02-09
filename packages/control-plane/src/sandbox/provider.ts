@@ -61,12 +61,16 @@ export interface CreateSandboxConfig {
 export interface CreateSandboxResult {
   /** The sandbox ID (should match expected ID from config) */
   sandboxId: string;
-  /** Provider's internal object ID (e.g., Modal's object ID for snapshot API) */
+  /** Provider's internal object ID (e.g., Rivet actor ID) */
   providerObjectId?: string;
   /** Initial sandbox status */
   status: string;
   /** Creation timestamp */
   createdAt: number;
+  /** URL of the sandbox-agent HTTP API (if available) */
+  sandboxUrl?: string | null;
+  /** Authentication token for the sandbox-agent API */
+  sandboxAgentToken?: string;
 }
 
 /**

@@ -1,8 +1,10 @@
 /**
- * Rivet Actors sandbox provider.
+ * Rivet sandbox provider.
  *
- * Replaces the Modal sandbox provider with Rivet's container orchestration.
- * Uses the Rivet REST API to create, manage, and destroy sandbox actors.
+ * Creates containers via Rivet's REST API. Each container runs sandbox-agent,
+ * which provides an HTTP/SSE API for controlling coding agents (Claude Code,
+ * Codex, OpenCode, Amp). The control plane communicates with sandbox-agent
+ * via its TypeScript SDK rather than raw WebSockets.
  */
 
 import { generateInternalToken } from "@open-inspect/shared";
@@ -16,6 +18,8 @@ import type {
 import { SandboxProviderError } from "../provider";
 
 const logger = createLogger("rivet-provider");
+
+const SANDBOX_AGENT_PORT = 2468;
 
 export interface RivetProviderConfig {
   apiUrl: string;
@@ -54,6 +58,9 @@ export class RivetSandboxProvider implements SandboxProvider {
       // Generate an internal auth token for sandbox → control plane communication
       const sandboxCallbackToken = await generateInternalToken(this.config.internalSecret);
 
+      // Generate a token for authenticating to the sandbox-agent HTTP API
+      const sandboxAgentToken = crypto.randomUUID();
+
       const response = await fetch(`${this.config.apiUrl}/actors`, {
         method: "POST",
         headers: this.headers,
@@ -71,7 +78,11 @@ export class RivetSandboxProvider implements SandboxProvider {
           },
           network: {
             ports: {
-              ws: { protocol: "tcp", routing: { guard: {} } },
+              http: {
+                protocol: "https",
+                routing: { guard: {} },
+                internalPort: SANDBOX_AGENT_PORT,
+              },
             },
           },
           resources: {
@@ -79,19 +90,24 @@ export class RivetSandboxProvider implements SandboxProvider {
             memory: 4096, // 4 GB
           },
           environment: {
+            // sandbox-agent configuration
+            SANDBOX_AGENT_TOKEN: sandboxAgentToken,
+
+            // Session metadata (used by sandbox-agent git setup)
             SANDBOX_ID: config.sandboxId,
             SESSION_ID: config.sessionId,
-            CONTROL_PLANE_URL: config.controlPlaneUrl,
-            SANDBOX_AUTH_TOKEN: config.sandboxAuthToken,
             REPO_OWNER: config.repoOwner,
             REPO_NAME: config.repoName,
+
+            // LLM configuration (available to coding agents inside the container)
             PROVIDER: config.provider || "anthropic",
             MODEL: config.model || "claude-sonnet-4-5",
+
+            // Git configuration
             ...(config.gitUserName ? { GIT_USER_NAME: config.gitUserName } : {}),
             ...(config.gitUserEmail ? { GIT_USER_EMAIL: config.gitUserEmail } : {}),
-            ...(config.opencodeSessionId
-              ? { OPENCODE_SESSION_ID: config.opencodeSessionId }
-              : {}),
+
+            // User-provided env vars (repo secrets, API keys, etc.)
             ...(config.userEnvVars || {}),
           },
           lifecycle: {
@@ -110,8 +126,20 @@ export class RivetSandboxProvider implements SandboxProvider {
       }
 
       const result = (await response.json()) as {
-        actor: { id: string; createdAt: string };
+        actor: {
+          id: string;
+          createdAt: string;
+          network: {
+            ports: Record<string, { hostname: string; port: number; path: string; protocol: string }>;
+          };
+        };
       };
+
+      // Extract the sandbox-agent URL from the Rivet response
+      const httpPort = result.actor.network?.ports?.http;
+      const sandboxUrl = httpPort
+        ? `${httpPort.protocol || "https"}://${httpPort.hostname}:${httpPort.port}${httpPort.path || ""}`
+        : null;
 
       const durationMs = Date.now() - startTime;
       logger.info("Sandbox created via Rivet", {
@@ -119,6 +147,7 @@ export class RivetSandboxProvider implements SandboxProvider {
         sandbox_id: config.sandboxId,
         session_id: config.sessionId,
         actor_id: result.actor.id,
+        sandbox_url: sandboxUrl,
         duration_ms: durationMs,
       });
 
@@ -127,6 +156,8 @@ export class RivetSandboxProvider implements SandboxProvider {
         providerObjectId: result.actor.id,
         status: "spawning",
         createdAt: Date.now(),
+        sandboxUrl,
+        sandboxAgentToken,
       };
     } catch (err) {
       if (err instanceof SandboxProviderError) throw err;

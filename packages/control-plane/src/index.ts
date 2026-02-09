@@ -75,20 +75,8 @@ async function main() {
         return;
       }
 
-      // Sandbox WebSocket: /sessions/:id/sandbox-ws
-      const sandboxMatch = url.pathname.match(
-        /^\/sessions\/([^/]+)\/sandbox-ws$/
-      );
-      if (sandboxMatch) {
-        const sessionId = sandboxMatch[1];
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          logger.info("Sandbox WebSocket connected", {
-            session_id: sessionId,
-          });
-          sessionManager.handleSandboxConnection(sessionId, ws);
-        });
-        return;
-      }
+      // Note: Sandbox communication now uses sandbox-agent HTTP/SSE API
+      // instead of a direct WebSocket connection. No /sandbox-ws endpoint needed.
 
       // Unknown WebSocket path
       socket.destroy();
