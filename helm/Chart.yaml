@@ -1,0 +1,16 @@
+apiVersion: v2
+name: open-inspect
+description: Open-Inspect - AI coding assistant platform
+version: 0.1.0
+appVersion: "0.1.0"
+type: application
+
+dependencies:
+  - name: postgresql
+    version: "~16.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: redis
+    version: "~20.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

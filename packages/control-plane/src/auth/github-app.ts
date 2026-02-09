@@ -367,25 +367,35 @@ export function isGitHubAppConfigured(env: {
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
 }): boolean {
-  return !!(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && env.GITHUB_APP_INSTALLATION_ID);
+  const appId = env.GITHUB_APP_ID || env.githubAppId;
+  const privateKey = env.GITHUB_APP_PRIVATE_KEY || env.githubAppPrivateKey;
+  const installationId = env.GITHUB_APP_INSTALLATION_ID || env.githubAppInstallationId;
+  return !!(appId && privateKey && installationId);
 }
 
 /**
  * Get GitHub App config from environment.
+ * Accepts both Cloudflare Env shape (GITHUB_APP_ID) and Node.js Config shape (githubAppId).
  */
 export function getGitHubAppConfig(env: {
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
 }): GitHubAppConfig | null {
   if (!isGitHubAppConfigured(env)) {
     return null;
   }
 
   return {
-    appId: env.GITHUB_APP_ID!,
-    privateKey: env.GITHUB_APP_PRIVATE_KEY!,
-    installationId: env.GITHUB_APP_INSTALLATION_ID!,
+    appId: (env.GITHUB_APP_ID || env.githubAppId)!,
+    privateKey: (env.GITHUB_APP_PRIVATE_KEY || env.githubAppPrivateKey)!,
+    installationId: (env.GITHUB_APP_INSTALLATION_ID || env.githubAppInstallationId)!,
   };
 }

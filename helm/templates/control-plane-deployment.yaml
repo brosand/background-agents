@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "open-inspect.fullname" . }}-control-plane
+  labels:
+    {{- include "open-inspect.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      {{- include "open-inspect.controlPlane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "open-inspect.controlPlane.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: control-plane
+          image: "{{ .Values.controlPlane.image.repository }}:{{ .Values.controlPlane.image.tag }}"
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.controlPlane.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.controlPlane.port }}"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: database-url
+            - name: REDIS_URL
+              value: "redis://{{ include "open-inspect.fullname" . }}-redis-master:6379"
+            - name: RIVET_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: rivet-api-url
+            - name: RIVET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: rivet-token
+            - name: RIVET_PROJECT
+              value: {{ .Values.rivet.project | quote }}
+            - name: RIVET_ENVIRONMENT
+              value: {{ .Values.rivet.environment | quote }}
+            - name: RIVET_SANDBOX_BUILD_TAG
+              value: {{ .Values.rivet.sandboxBuildTag | quote }}
+            - name: TOKEN_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: token-encryption-key
+            - name: REPO_SECRETS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: repo-secrets-encryption-key
+            - name: INTERNAL_CALLBACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: internal-callback-secret
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: github-app-id
+                  optional: true
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: github-app-private-key
+                  optional: true
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: github-app-installation-id
+                  optional: true
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: github-client-id
+                  optional: true
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.controlPlane }}
+                  key: github-client-secret
+                  optional: true
+            - name: WORKER_URL
+              value: "https://{{ .Values.ingress.controlPlane.host }}"
+            - name: WEB_APP_URL
+              value: "https://{{ .Values.ingress.web.host }}"
+            - name: DEPLOYMENT_NAME
+              value: {{ .Release.Name | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "open-inspect.fullname" . }}-control-plane
+  labels:
+    {{- include "open-inspect.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.controlPlane.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "open-inspect.controlPlane.selectorLabels" . | nindent 4 }}
